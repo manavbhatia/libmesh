@@ -425,9 +425,8 @@ ImplicitSystem::adjoint_solve (const QoISet& qoi_indices)
 #ifdef LIBMESH_ENABLE_CONSTRAINTS
   for (unsigned int i=0; i != this->qoi.size(); ++i)
     if (qoi_indices.has_index(i))
-      this->get_dof_map().enforce_constraints_exactly
-        (*this, &this->get_adjoint_solution(i),
-         /* homogeneous = */ true);
+      this->get_dof_map().enforce_adjoint_constraints_exactly
+        (this->get_adjoint_solution(i), i);
 #endif
 
   // Stop logging the nonlinear solve
@@ -454,6 +453,12 @@ ImplicitSystem::weighted_sensitivity_adjoint_solve (const ParameterVector& param
   // Now we're assembling a weighted sum of adjoint-adjoint systems:
   //
   // dR/du (u, sum_l(w_l*z^l)) = sum_l(w_l*(Q''_ul - R''_ul (u, z)))
+
+  // FIXME: The derivation here does not yet take adjoint boundary
+  // conditions into account.
+  for (unsigned int i=0; i != this->qoi.size(); ++i)
+    if (qoi_indices.has_index(i))
+      libmesh_assert(!this->get_dof_map().has_adjoint_dirichlet_boundaries(i));
 
   // We'll assemble the rhs first, because the R'' term will require
   // perturbing the jacobian
@@ -755,8 +760,23 @@ void ImplicitSystem::adjoint_qoi_parameter_sensitivity
       
       for (unsigned int i=0; i != Nq; ++i)
         if (qoi_indices.has_index(i))
-          sensitivities[i][j] = partialq_partialp[i] -
-          partialR_partialp->dot(this->get_adjoint_solution(i));
+          {
+            
+            if (this->get_dof_map().has_adjoint_dirichlet_boundaries(i))
+	      {
+                AutoPtr<NumericVector<Number> > lift_func =
+		  this->get_adjoint_solution(i).zero_clone();
+                this->get_dof_map().enforce_constraints_exactly
+		  (*this, lift_func.get(),
+		   /* homogeneous = */ false);
+                sensitivities[i][j] = partialq_partialp[i] -
+                  partialR_partialp->dot(*lift_func) -
+                  partialR_partialp->dot(this->get_adjoint_solution(i));
+              }
+	    else
+              sensitivities[i][j] = partialq_partialp[i] -
+                partialR_partialp->dot(this->get_adjoint_solution(i));
+	  }
     }
 
   // All parameters have been reset.
@@ -805,6 +825,8 @@ void ImplicitSystem::forward_qoi_parameter_sensitivity
 
   // We get (partial q / partial u) from the user
   this->assemble_qoi_derivative(qoi_indices);
+
+  // FIXME: what do we do with adjoint boundary conditions here?
 
   // We don't need these to be closed() in this function, but libMesh
   // standard practice is to have them closed() by the time the
